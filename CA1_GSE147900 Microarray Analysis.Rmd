@@ -1,0 +1,266 @@
+library(GEOquery)
+library(oligo)
+library(oligoClasses)
+library(tidyverse)
+library(ggplot2)
+library(corrplot)
+library(pheatmap)
+library(limma)
+library(GCSscore)
+library(DESeq2)
+library(knitr)
+library(annotate)
+library(pd.mta.1.0)
+library(mta10probeset.db)
+library(mta10transcriptcluster.db)
+library(gridExtra)
+
+setwd("C:/Users/Timucin/Desktop/R_projects/CA1/GSE147900")
+
+gse147900 <- getGEO('gse147900', getGPL=TRUE , GSEMatrix = TRUE)
+
+#reading unzipped cel files
+celpath = "C:/Users/Timucin/Desktop/R_projects/CA1/GSE147900/GSE147900_RAW.tar"
+list.celfiles = list.celfiles()
+gse147900_celdata = read.celfiles(list.celfiles)
+
+class(gse147900[[1]])
+
+#What methods are available to call on this class of data?
+methods(class=class(gse147900))
+methods(class=class(gse147900_celdata))
+
+#plots a pseudo-image of the chip intensities, just for fun
+#image(gse147900_celdata[,1])
+
+#project data
+pd <- pData(gse147900[[1]])
+pd['cel_file'] <- str_split(pd$supplementary_file,"/") %>% map_chr(tail,1)
+#making sure celdata is ordered correctly
+gse147900_celdata <- read.celfiles(paste0('C:/Users/Timucin/Desktop/R_projects/CA1/GSE147900/',pd$cel_file),phenoData=phenoData(gse147900_celdata))
+pd$data_processing
+
+#added a simplified EB treatment column to pd because the other one had too much text
+pd$treatment.EB <- c("V","V","V","V","V","V","EB","EB","EB","EB","EB","EB")
+#also one more for genotypes for clarity
+pd$genotype <- c("WT", "WT", "WT", "ArKO", "ArKO","ArKO","WT", "WT", "WT", "ArKO", "ArKO","ArKO")
+
+#builds a little table where the columns of interest can be viewed
+pd[,c("geo_accession","title","genotype","treatment.EB")]
+
+#RMA processing
+gse147900_eset <- rma(gse147900_celdata)
+#take a look at the expression matrix
+exprs(gse147900_eset)
+exprs <- exprs(gse147900_eset)
+dim(exprs(gse147900_eset))
+
+pd_eset <- pData(gse147900_eset)
+dim(pd_eset)
+
+#plot a histogram of all the cel files
+hist(gse147900_eset, main = paste("CEL file densities after RMA"))
+#normalising data on a common empirical distribution
+gse147900_celdata_oligo_normalised <- normalize(gse147900_celdata,method='quantile')
+hist(gse147900_celdata_oligo_normalised, target = "core", main = paste("CEL file densities after quantile normalisation"))
+
+#create a dummy variable that represents the four groups
+pd$treatment.EB <- as.factor(pd$treatment.EB)
+levels(pd$treatment.EB) <- c("EB","V")
+pd$group <- as.factor(paste(pd$genotype,pd$treatment.EB))
+#combined the genotype and treatment colums to form a group column 
+pd$group <- paste(pd$genotype, pd$treatment.EB, sep="_")
+levels(pd$group) <- c("WT_V","WT_EB","ArKO_V","ArKO_EB")
+#check if group info lines up with actual info
+pd[,c("geo_accession","genotype","treatment.EB","group")]
+
+#create a design representing the different groups
+design <- model.matrix(~ 0 + pd$group)
+colnames(design) <- levels(pd$group)
+design
+
+contrasts_matrix <- makeContrasts(WT_EB_vs_WT_V=WT_EB-WT_V,
+                    ArKO_EB_vs_ArKO_V=ArKO_EB-ArKO_V, 
+                    ArKO_V_vs_WT_V=ArKO_V-WT_V, 
+                    ArKO_EB_vs_WT_EB=ArKO_EB-WT_EB, 
+                    ArKO_EB_vs_WT_V=ArKO_EB-WT_V,
+                    levels=design)
+                  
+#print the contrast matrix with knitr                  
+kable(contrasts_matrix)
+
+#fitting a model to the data
+gse147900_fit <- lmFit(gse147900_eset,design)
+gse147900_fit2 <- contrasts.fit(gse147900_fit,contrasts=contrasts_matrix)
+gse147900_fit2 <- eBayes(gse147900_fit2)
+#print the number of up and downregulated genes per condition
+kable(summary(decideTests(gse147900_fit2,lfc=1)))
+contrasts_w_null <- (summary(decideTests(gse147900_fit2,lfc=1)))
+contrasts = contrasts_w_null[-2,]
+corrplot(contrasts, title = "Up and downregulated probes",is.corr = FALSE, method = "color",  addCoef.col = 'black',mar=c(0,0,2,0))
+
+#top 10 results of differential expression analysis in a ProbeSet
+ps <- rownames(topTable(gse147900_fit2))
+
+#see what mta10transcriptcluster.db has to offer
+columns(mta10transcriptcluster.db)
+keytypes(mta10transcriptcluster.db)
+head(keys(mta10transcriptcluster.db,keytype="PROBEID"))
+
+ps2 <- topTable(gse147900_fit2,number=Inf,p.value = 0.05,lfc=1)
+Annotated_probes <- AnnotationDbi::select(mta10transcriptcluster.db,ps2,
+                      columns=c("SYMBOL","ENTREZID","GENENAME"),keys = rownames(ps2),
+                      keytype = "PROBEID")
+#get rid of empty rows i.e. unannotated probes
+Annotated_probes <- Annotated_probes %>% drop_na()
+
+#LogFC cutoff 1 in conditions of interest
+WT_EB_vs_WT_V_up        <- rownames(ps2[ps2$WT_EB_vs_WT > 1,])
+WT_EB_vs_WT_V_down      <- rownames(ps2[ps2$WT_EB_vs_WT < -1,])
+ArKO_EB_vs_WT_EB_up     <- rownames(ps2[ps2$ArKO_EB_vs_WT_EB > 1,])
+ArKO_EB_vs_WT_EB_down   <- rownames(ps2[ps2$ArKO_EB_vs_WT_EB < -1,])
+ArKO_EB_vs_WT_V_up      <- rownames(ps2[ps2$ArKO_EB_vs_WT_V > 1,])
+ArKO_EB_vs_WT_V_down    <- rownames(ps2[ps2$ArKO_EB_vs_WT_V < -1,])
+
+#getting the names of interesting up and downregulated genes
+df_WT_EB_vs_WT_V_up <- AnnotationDbi::select(mta10transcriptcluster.db,WT_EB_vs_WT_V_up,c("SYMBOL","ENTREZID","GENENAME"),keytype="PROBEID")
+df_WT_EB_vs_WT_V_up <- df_WT_EB_vs_WT_V_up %>% drop_na()
+
+df_WT_EB_vs_WT_V_down <- AnnotationDbi::select(mta10transcriptcluster.db,WT_EB_vs_WT_V_down,c("SYMBOL","ENTREZID","GENENAME"),keytype="PROBEID")
+df_WT_EB_vs_WT_V_down <- df_WT_EB_vs_WT_V_down %>% drop_na()
+
+df_ArKO_EB_vs_WT_EB_up <- AnnotationDbi::select(mta10transcriptcluster.db,ArKO_EB_vs_WT_EB_up,c("SYMBOL","ENTREZID","GENENAME"),keytype="PROBEID")
+df_ArKO_EB_vs_WT_EB_up <- df_ArKO_EB_vs_WT_EB_up %>% drop_na()
+
+df_ArKO_EB_vs_WT_EB_down <- AnnotationDbi::select(mta10transcriptcluster.db,ArKO_EB_vs_WT_EB_down,c("SYMBOL","ENTREZID","GENENAME"),keytype="PROBEID")
+df_ArKO_EB_vs_WT_EB_down <- df_ArKO_EB_vs_WT_EB_down %>% drop_na()
+
+df_ArKO_EB_vs_WT_V_up <- AnnotationDbi::select(mta10transcriptcluster.db,ArKO_EB_vs_WT_V_up,c("SYMBOL","ENTREZID","GENENAME"),keytype="PROBEID")
+df_ArKO_EB_vs_WT_V_up <- df_ArKO_EB_vs_WT_V_up %>% drop_na()
+
+df_ArKO_EB_vs_WT_V_down <- AnnotationDbi::select(mta10transcriptcluster.db,ArKO_EB_vs_WT_V_down,c("SYMBOL","ENTREZID","GENENAME"),keytype="PROBEID")
+df_ArKO_EB_vs_WT_V_down <- df_ArKO_EB_vs_WT_V_down %>% drop_na()
+
+nrow_df_WT_EB_vs_WT_V_up <-nrow(df_WT_EB_vs_WT_V_up)
+nrow_df_WT_EB_vs_WT_V_down <-nrow(df_WT_EB_vs_WT_V_down)
+nrow_df_ArKO_EB_vs_WT_EB_up <-nrow(df_ArKO_EB_vs_WT_EB_up)
+nrow_df_ArKO_EB_vs_WT_EB_down <-nrow(df_ArKO_EB_vs_WT_EB_down)
+nrow_df_ArKO_EB_vs_WT_V_up <-nrow(df_ArKO_EB_vs_WT_V_up)
+nrow_df_ArKO_EB_vs_WT_V_down <-nrow(df_ArKO_EB_vs_WT_V_down)
+
+#drawing a table of the contrasts of interest
+Matrix_annotated_genes <- matrix(c(nrow_df_WT_EB_vs_WT_V_up,nrow_df_ArKO_EB_vs_WT_EB_up,nrow_df_ArKO_EB_vs_WT_V_up,nrow_df_WT_EB_vs_WT_V_down,nrow_df_ArKO_EB_vs_WT_EB_down,nrow_df_ArKO_EB_vs_WT_V_down), ncol=3, byrow=TRUE)
+colnames(Matrix_annotated_genes) <- c('WT_EB_vs_WT_V','ArKO_EB_vs_WT_EB','ArKO_EB_vs_WT_V')
+rownames(Matrix_annotated_genes) <- c('Up','Down')
+corrplot(Matrix_annotated_genes, title = "Up and downregulated genes",is.corr = FALSE, method = "color",  addCoef.col = 'black',mar=c(0,0,2,0))
+
+
+#saving .csv files of top up and downregulated genes
+topTable  <- topTable(gse147900_fit2,n=Inf)
+topTable_annotated <- AnnotationDbi::select(mta10transcriptcluster.db,topTable,
+                      columns=c("SYMBOL","GENENAME"),keys = rownames(topTable),
+                      keytype = "PROBEID")
+#topTable_annotated <- merge((topTable[,c(1:4)]),topTable_annotated)           
+topTable_annotated <- topTable_annotated %>% drop_na()
+topTable_annotated <- head(topTable_annotated,10)
+write_csv(topTable_annotated, file="C:/Users/Timucin/Desktop/R_projects/CA1/GSE147900/topDEGs.csv")
+
+topTable1 <- topTable(gse147900_fit2, coef=1, n=Inf)
+topTable1 <- arrange(topTable1, -logFC)
+topTable_annotated1 <- AnnotationDbi::select(mta10transcriptcluster.db,topTable1,
+                      columns=c("SYMBOL","GENENAME"),keys = rownames(topTable1),
+                      keytype = "PROBEID")
+topTable_annotated1 <- topTable_annotated1 %>% drop_na()
+topTable_annotated1 <- head(topTable_annotated1,5)
+write_csv(topTable_annotated1, file="C:/Users/Timucin/Desktop/R_projects/CA1/GSE147900/WT_EB_vs_WT_V_up.csv")
+
+topTable1d <- arrange(topTable1, logFC)
+topTable_annotated1d <- AnnotationDbi::select(mta10transcriptcluster.db,topTable1d,
+                      columns=c("SYMBOL","GENENAME"),keys = rownames(topTable1d),
+                      keytype = "PROBEID")
+topTable_annotated1d <- topTable_annotated1d %>% drop_na()
+topTable_annotated1d <- head(topTable_annotated1d,5)
+write_csv(topTable_annotated1d, file="C:/Users/Timucin/Desktop/R_projects/CA1/GSE147900/WT_EB_vs_WT_V_down.csv")
+
+topTable4 <- topTable(gse147900_fit2, coef=4, n=Inf)
+topTable4 <- arrange(topTable4, -logFC)
+topTable_annotated4 <- AnnotationDbi::select(mta10transcriptcluster.db,topTable4,
+                      columns=c("SYMBOL","GENENAME"),keys = rownames(topTable4),
+                      keytype = "PROBEID")
+topTable_annotated4 <- topTable_annotated4 %>% drop_na()
+topTable_annotated4 <- head(topTable_annotated4,5)
+write_csv(topTable_annotated4, file="C:/Users/Timucin/Desktop/R_projects/CA1/GSE147900/ArKO_EB_vs_WT_EB_up.csv")
+
+topTable4d <- arrange(topTable4, logFC)
+topTable_annotated4d <- AnnotationDbi::select(mta10transcriptcluster.db,topTable4d,
+                      columns=c("SYMBOL","GENENAME"),keys = rownames(topTable4d),
+                      keytype = "PROBEID")
+topTable_annotated4d <- topTable_annotated4d %>% drop_na()
+topTable_annotated4d <- head(topTable_annotated4d,5)
+write_csv(topTable_annotated4d, file="C:/Users/Timucin/Desktop/R_projects/CA1/GSE147900/ArKO_EB_vs_WT_EB_down.csv")
+
+topTable5 <- topTable(gse147900_fit2, coef=5, n=Inf)
+topTable5 <- arrange(topTable5, logFC)
+topTable_annotated5 <- AnnotationDbi::select(mta10transcriptcluster.db,topTable5,
+                      columns=c("SYMBOL","GENENAME"),keys = rownames(topTable5),
+                      keytype = "PROBEID")
+topTable_annotated5 <- topTable_annotated5 %>% drop_na()
+topTable_annotated5 <- head(topTable_annotated5,10)
+write_csv(topTable_annotated5, file="C:/Users/Timucin/Desktop/R_projects/CA1/GSE147900/ArKO_EB_vs_WT_V.csv")
+
+write.csv(topTable1, file="C:/Users/Timucin/Desktop/R_projects/CA1/GSE147900/WT_EB_vs_WT_V_TOPTABLE.csv", row.names=TRUE)
+write.csv(topTable4, file="C:/Users/Timucin/Desktop/R_projects/CA1/GSE147900/ArKO_EB_vs_WT_EB_TOPTABLE.csv", row.names=TRUE)
+write.csv(topTable5, file="C:/Users/Timucin/Desktop/R_projects/CA1/GSE147900/ArKO_EB_vs_WT_V_TOPTABLE.csv", row.names=TRUE)
+
+
+#plotting volcano plots for contrasts of interest
+interesting_genes  <- topTable(gse147900_fit2, number=Inf, p.value = 0.05, lfc=1)
+interesting_genes1 <- topTable(gse147900_fit2, number=Inf, p.value = 0.05, lfc=1, coef=1)
+interesting_genes4 <- topTable(gse147900_fit2, number=Inf, p.value = 0.05, lfc=1, coef=4)
+interesting_genes5 <- topTable(gse147900_fit2, number=Inf, p.value = 0.05, lfc=1, coef=5)
+
+volcanoplot(gse147900_fit2, coef=1, main=sprintf("WT_EB_vs_WT_V, %d features pass our cutoffs",nrow(interesting_genes1)))
+points(interesting_genes1[['logFC']],-log10(interesting_genes1[['P.Value']]),col='red')
+
+volcanoplot(gse147900_fit2, coef=4, main=sprintf("ArKO_EB_vs_WT_EB, %d features pass our cutoffs",nrow(interesting_genes4)))
+points(interesting_genes4[['logFC']],-log10(interesting_genes4[['P.Value']]),col='red')
+
+volcanoplot(gse147900_fit2, coef=5, main=sprintf("ArKO_EB_vs_WT_V, %d features pass our cutoffs",nrow(interesting_genes5)))
+points(interesting_genes5[['logFC']],-log10(interesting_genes5[['P.Value']]),col='red')
+
+
+Annotated_interest <- AnnotationDbi::select(mta10transcriptcluster.db,interesting_genes,
+                      columns=c("SYMBOL","ENTREZID","GENENAME"),keys = rownames(interesting_genes),
+                      keytype = "PROBEID")
+Annotated_interest <- Annotated_interest %>% drop_na()
+Annotated_interest1 <- AnnotationDbi::select(mta10transcriptcluster.db,interesting_genes1,
+                      columns=c("SYMBOL","ENTREZID","GENENAME"),keys = rownames(interesting_genes1),
+                      keytype = "PROBEID")
+Annotated_interest1 <- Annotated_interest1 %>% drop_na()
+Annotated_interest4 <- AnnotationDbi::select(mta10transcriptcluster.db,interesting_genes4,
+                      columns=c("SYMBOL","ENTREZID","GENENAME"),keys = rownames(interesting_genes4),
+                      keytype = "PROBEID")
+Annotated_interest4 <- Annotated_interest4 %>% drop_na()
+Annotated_interest5 <- AnnotationDbi::select(mta10transcriptcluster.db,interesting_genes5,
+                      columns=c("SYMBOL","ENTREZID","GENENAME"),keys = rownames(interesting_genes5),
+                      keytype = "PROBEID")
+Annotated_interest5 <- Annotated_interest5 %>% drop_na()
+
+
+eset_of_interest <- gse147900_eset[rownames(interesting_genes),]
+exprs_interest <- exprs(eset_of_interest)
+heatmap(exprs_interest, 
+        labCol = c("WT_V1","WT_V2","WT_V3","ArKO_V1","ArKO_V2","ArKO_V3","WT_EB1","WT_EB2","WT_EB3","ArKO_EB1","ArKO_EB2","ArKO_EB3"), labRow = Annotated_interest$SYMBOL)
+
+eset_of_interest1 <- gse147900_eset[rownames(interesting_genes1),]
+exprs_interest1 <- exprs(eset_of_interest1)
+heatmap(exprs_interest1, labCol = c("WT_V1","WT_V2","WT_V3","ArKO_V1","ArKO_V2","ArKO_V3","WT_EB1","WT_EB2","WT_EB3","ArKO_EB1","ArKO_EB2","ArKO_EB3"), labRow = Annotated_interest1$SYMBOL, main=sprintf("WT_EB vs WT_V"),  margins = c(10,10))
+
+eset_of_interest4 <- gse147900_eset[rownames(interesting_genes4),]
+exprs_interest4 <- exprs(eset_of_interest4)
+heatmap(exprs_interest4, labCol = c("WT_V1","WT_V2","WT_V3","ArKO_V1","ArKO_V2","ArKO_V3","WT_EB1","WT_EB2","WT_EB3","ArKO_EB1","ArKO_EB2","ArKO_EB3"), labRow = Annotated_interest4$SYMBOL, main=sprintf("ArKO_EB vs WT_EB"), margins = c(10,10))
+
+eset_of_interest5 <- gse147900_eset[rownames(interesting_genes5),]
+exprs_interest5 <- exprs(eset_of_interest5)
+heatmap(exprs_interest5, labCol = c("WT_V1","WT_V2","WT_V3","ArKO_V1","ArKO_V2","ArKO_V3","WT_EB1","WT_EB2","WT_EB3","ArKO_EB1","ArKO_EB2","ArKO_EB3"), labRow = Annotated_interest5$SYMBOL, main=sprintf("ArKO_EB vs WT_V"), margins = c(10,10))
+
