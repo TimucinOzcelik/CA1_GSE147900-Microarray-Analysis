@@ -30,9 +30,6 @@ class(gse147900[[1]])
 methods(class=class(gse147900))
 methods(class=class(gse147900_celdata))
 
-#plots a pseudo-image of the chip intensities, just for fun
-#image(gse147900_celdata[,1])
-
 #project data
 pd <- pData(gse147900[[1]])
 pd['cel_file'] <- str_split(pd$supplementary_file,"/") %>% map_chr(tail,1)
@@ -40,9 +37,9 @@ pd['cel_file'] <- str_split(pd$supplementary_file,"/") %>% map_chr(tail,1)
 gse147900_celdata <- read.celfiles(paste0('C:/Users/Timucin/Desktop/R_projects/CA1/GSE147900/',pd$cel_file),phenoData=phenoData(gse147900_celdata))
 pd$data_processing
 
-#added a simplified EB treatment column to pd because the other one had too much text
+#added a simplified EB treatment column to pd because the original one had too much text
 pd$treatment.EB <- c("V","V","V","V","V","V","EB","EB","EB","EB","EB","EB")
-#also one more for genotypes for clarity
+#also one more for genotypes, for clarity
 pd$genotype <- c("WT", "WT", "WT", "ArKO", "ArKO","ArKO","WT", "WT", "WT", "ArKO", "ArKO","ArKO")
 
 #builds a little table where the columns of interest can be viewed
@@ -78,7 +75,6 @@ pd[,c("geo_accession","genotype","treatment.EB","group")]
 design <- model.matrix(~ 0 + pd$group)
 colnames(design) <- levels(pd$group)
 design
-
 contrasts_matrix <- makeContrasts(WT_EB_vs_WT_V=WT_EB-WT_V,
                     ArKO_EB_vs_ArKO_V=ArKO_EB-ArKO_V, 
                     ArKO_V_vs_WT_V=ArKO_V-WT_V, 
@@ -159,8 +155,7 @@ corrplot(Matrix_annotated_genes, title = "Up and downregulated genes",is.corr = 
 topTable  <- topTable(gse147900_fit2,n=Inf)
 topTable_annotated <- AnnotationDbi::select(mta10transcriptcluster.db,topTable,
                       columns=c("SYMBOL","GENENAME"),keys = rownames(topTable),
-                      keytype = "PROBEID")
-#topTable_annotated <- merge((topTable[,c(1:4)]),topTable_annotated)           
+                      keytype = "PROBEID")         
 topTable_annotated <- topTable_annotated %>% drop_na()
 topTable_annotated <- head(topTable_annotated,10)
 write_csv(topTable_annotated, file="C:/Users/Timucin/Desktop/R_projects/CA1/GSE147900/topDEGs.csv")
